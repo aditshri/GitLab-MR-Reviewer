@@ -6,7 +6,7 @@ Initial project foundation for an internal Python web application.
 
 This foundation includes the package layout, configuration placeholder, entry point, environment template, dependency file, ignore rules, and test directory.
 
-GitLab integration, Claude/Anthropic integration, API routes, UI, database support, and application dependencies are intentionally deferred.
+GitLab integration, GitHub Models integration, API routes, UI, audit storage, and rules management are included in the current application.
 
 ## Run
 

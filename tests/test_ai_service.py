@@ -29,11 +29,30 @@ def _prompt_kwargs(review_type: str) -> dict[str, object]:
         "mr_details": {"title": "Improve parser", "author": "alice"},
         "diff": "diff --git a/parser.py b/parser.py\n+return value",
         "rules": {
-            "enabled_categories": ["security", "testing"],
             "rules": {
-                "security": ["Validate untrusted input."],
-                "testing": ["Cover changed behavior."],
+                "code_quality": [],
+                "security": [
+                    {
+                        "id": "validate-input",
+                        "severity": "high",
+                        "description": "Validate untrusted input.",
+                    }
+                ],
+                "performance": [],
+                "testing": [
+                    {
+                        "id": "cover-behavior",
+                        "severity": "medium",
+                        "description": "Cover changed behavior.",
+                    }
+                ],
             },
+            "general": {
+                "tone": "constructive",
+                "detail_level": "comprehensive",
+                "suggest_improvements": True,
+            },
+            "team": {"name": "default", "guidance": []},
         },
         "review_type": review_type,
         "requirements": "Keep the parser backward compatible.",

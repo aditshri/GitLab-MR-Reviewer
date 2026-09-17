@@ -1,9 +1,6 @@
 """Unit tests for review rules loading and validation."""
 
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock
-
 import pytest
 
 from app.review_rules_service import (
@@ -13,7 +10,6 @@ from app.review_rules_service import (
     InvalidReviewRulesError,
     ReviewRulesService,
 )
-from app.claude_service import ClaudeService
 
 
 VALID_RULES = """
@@ -142,15 +138,3 @@ def test_all_rule_categories_are_supported() -> None:
     assert all(rules["rules"][category] for category in RULE_CATEGORIES)
 
 
-def test_claude_service_can_load_default_rules() -> None:
-    """ClaudeService exposes the validated bundled rules to the workflow."""
-
-    service = ClaudeService(
-        model="test-model",
-        config=SimpleNamespace(ANTHROPIC_API_KEY="placeholder-api-key"),
-        client=Mock(),
-    )
-
-    rules = service.load_review_rules()
-
-    assert set(rules["rules"]) == set(RULE_CATEGORIES)

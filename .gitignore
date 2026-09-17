@@ -4,7 +4,7 @@ __pycache__/
 venv/
 .env
 .pytest_cache/
+audit_logs/
 
 *.pyc
 
-.env.example

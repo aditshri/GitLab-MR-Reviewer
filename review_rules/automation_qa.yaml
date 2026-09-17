@@ -1,29 +1,27 @@
 general:
-  team_name: "Automation QA"
-  enabled_categories:
-    - code_quality
-    - performance
-    - testing
-
-security:
-  strict_mode: false
-
-testing:
-  min_coverage_percent: 90
-  automation:
-    - Require regression tests for changed behavior and failure paths.
-    - Prefer deterministic tests with isolated fixtures and repeatable data.
-    - Cover API contracts, boundary conditions, retries, and cleanup behavior.
-
-output:
-  include_positive_feedback: true
-  severity_levels:
-    - critical
-    - high
-    - medium
-    - low
-
-ai_behavior:
   tone: constructive
   detail_level: comprehensive
   suggest_improvements: true
+
+team:
+  name: "Automation QA"
+  guidance:
+    - Prefer deterministic tests with isolated fixtures and repeatable data.
+
+rules:
+  code_quality:
+    - id: qa-testable-design
+      severity: medium
+      description: Keep changed behavior observable and straightforward to test.
+  security: []
+  performance:
+    - id: qa-reliable-automation
+      severity: medium
+      description: Avoid unnecessary waits and nondeterministic dependencies in automation.
+  testing:
+    - id: qa-regression-coverage
+      severity: high
+      description: Require regression tests for changed behavior and failure paths.
+    - id: qa-api-boundaries
+      severity: high
+      description: Cover API contracts, boundary conditions, retries, and cleanup behavior.

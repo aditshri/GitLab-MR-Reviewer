@@ -22,7 +22,7 @@ class ReviewRule(TypedDict):
 
 
 class ReviewRules(TypedDict):
-    """Validated rules configuration consumed by ClaudeService."""
+    """Validated rules configuration consumed by the AI review service."""
 
     general: dict[str, Any]
     team: dict[str, Any]

@@ -28,7 +28,7 @@ class Config:
         "https://models.github.ai/inference",
     )
     GITHUB_MODELS_MODEL = os.getenv("GITHUB_MODELS_MODEL", "openai/gpt-4o-mini")
-    REVIEW_RULES_FILE = os.getenv("REVIEW_RULES_FILE", "review_rules.yaml")
+    RULES_DIRECTORY = os.getenv("RULES_DIRECTORY", "review_rules")
 
     FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
     DEBUG = _as_bool(os.getenv("FLASK_DEBUG"), default=False)

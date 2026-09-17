@@ -1,33 +1,36 @@
 general:
-  team_name: "Payment Stream"
-  enabled_categories:
-    - code_quality
-    - security
-    - testing
-
-security:
-  strict_mode: true
-  pci_dss:
-    - Never log full PANs, CVVs, authentication data, or payment secrets.
-    - Protect cardholder data in transit and at rest using approved encryption.
-    - Validate authorization boundaries for payment, refund, and settlement flows.
-    - Reject sensitive data in error messages, traces, and audit logs.
-
-testing:
-  min_coverage_percent: 70
-  payment_scenarios:
-    - Cover duplicate submissions and idempotency behavior.
-    - Test declined, partially authorized, refunded, and timed-out transactions.
-
-output:
-  include_positive_feedback: true
-  severity_levels:
-    - critical
-    - high
-    - medium
-    - low
-
-ai_behavior:
   tone: constructive
   detail_level: comprehensive
   suggest_improvements: true
+
+team:
+  name: "Payment Stream"
+  guidance:
+    - Follow PCI-DSS controls for cardholder data and payment workflows.
+
+rules:
+  code_quality:
+    - id: payment-clear-error-handling
+      severity: high
+      description: Keep payment failure and retry behavior explicit and auditable.
+  security:
+    - id: pci-no-sensitive-logging
+      severity: critical
+      description: Never log full PANs, CVVs, authentication data, or payment secrets.
+    - id: pci-protect-cardholder-data
+      severity: critical
+      description: Protect cardholder data in transit and at rest using approved encryption.
+    - id: pci-authorize-payment-actions
+      severity: critical
+      description: Validate authorization boundaries for payment, refund, and settlement flows.
+    - id: pci-safe-error-messages
+      severity: high
+      description: Reject sensitive data in error messages, traces, and audit logs.
+  performance:
+    - id: payment-idempotency
+      severity: high
+      description: Make payment submissions idempotent to prevent duplicate charges.
+  testing:
+    - id: payment-scenarios
+      severity: high
+      description: Test declined, partially authorized, refunded, timed-out, and duplicate transactions.

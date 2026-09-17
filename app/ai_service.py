@@ -5,11 +5,19 @@ from __future__ import annotations
 import json
 import logging
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
 from openai import APIConnectionError, APIError, AuthenticationError, OpenAI, RateLimitError
+
+from app.review_rules_service import (
+    DEFAULT_REVIEW_RULES,
+    InvalidReviewRulesError,
+    ReviewRules,
+    ReviewRulesService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -18,16 +26,6 @@ logger = logging.getLogger(__name__)
 class AIServiceError(Exception):
     """Raised when the AI review service cannot complete an operation."""
 
-
-DEFAULT_RULES: dict[str, Any] = {
-    "enabled_categories": ["code_quality", "security", "performance", "testing"],
-    "rules": {
-        "code_quality": ["Check correctness, readability, and maintainability."],
-        "security": ["Check authentication, authorization, secrets, and input validation."],
-        "performance": ["Check unnecessary work, inefficient algorithms, and resource usage."],
-        "testing": ["Check coverage of changed behavior and regression cases."],
-    },
-}
 
 _REVIEW_GUIDANCE = {
     "quick": "Prioritize only the highest-confidence, highest-impact findings and keep the review concise.",
@@ -62,23 +60,22 @@ class AIReviewService:
             raise AIServiceError("Unable to initialize the GitHub Models client.") from exc
 
     @staticmethod
-    def load_rules(rules_file_path: str | Path) -> dict[str, Any]:
+    def load_rules(rules_file_path: str | Path) -> ReviewRules:
         """Load YAML review rules, falling back to defaults on any file error."""
 
         try:
             rules = yaml.safe_load(Path(rules_file_path).read_text(encoding="utf-8"))
-            if not isinstance(rules, dict):
-                raise ValueError("rules document must be a mapping")
+            ReviewRulesService.validate(rules)
             return rules
-        except (OSError, ValueError, yaml.YAMLError) as exc:
+        except (OSError, ValueError, yaml.YAMLError, InvalidReviewRulesError) as exc:
             logger.warning("Unable to load review rules from %s: %s", rules_file_path, exc)
-            return dict(DEFAULT_RULES)
+            return deepcopy(DEFAULT_REVIEW_RULES)
 
     def build_review_prompt(
         self,
         mr_details: Mapping[str, Any],
         diff: str,
-        rules: Mapping[str, Any],
+        rules: ReviewRules,
         review_type: str,
         requirements: str | None = None,
     ) -> str:
@@ -201,24 +198,16 @@ class AIReviewService:
         return "\n".join(f"- {key}: {value}" for key, value in values.items())
 
     @staticmethod
-    def _format_rules(rules: Mapping[str, Any]) -> str:
-        rule_groups = rules.get("rules", rules)
-        enabled = rules.get("enabled_categories")
-        if isinstance(enabled, list):
-            enabled_categories = [str(category) for category in enabled]
-        elif isinstance(rule_groups, Mapping):
-            enabled_categories = [str(category) for category, values in rule_groups.items() if values]
-        else:
-            return "- No enabled rules provided."
+    def _format_rules(rules: ReviewRules) -> str:
+        """Format validated canonical rules by category."""
 
         lines: list[str] = []
-        for category in enabled_categories:
-            values = rule_groups.get(category, []) if isinstance(rule_groups, Mapping) else []
+        for category, values in rules["rules"].items():
             lines.append(f"### {category}")
-            if isinstance(values, list):
-                lines.extend(f"- {value}" for value in values)
-            elif values:
-                lines.append(f"- {values}")
+            lines.extend(
+                f"- [{rule['severity']}] {rule['description']}"
+                for rule in values
+            )
         return "\n".join(lines) or "- No enabled rules provided."
 
     @staticmethod

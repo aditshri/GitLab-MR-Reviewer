@@ -4,16 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from flask import Blueprint, Flask, Response, current_app, jsonify, redirect, render_template, request, session
+from flask import Blueprint, Flask, Response, jsonify, render_template, request, session
 
 from app.audit_service import AuditService
 from app.ai_service import AIReviewService, AIServiceError
-from app.claude_service import (
-    ClaudeAPIError,
-    ClaudeConfigurationError,
-    ClaudeService,
-    UnsupportedReviewTypeError,
-)
 from app.gitlab_service import (
     GitLabAuthenticationError,
     GitLabAPIError,
@@ -29,16 +23,10 @@ from app.rules_management_service import (
     UnsafeRuleSetNameError,
 )
 from app.rules_generator import RulesGenerator
-from config import Config
-
 SUPPORTED_REVIEW_TYPES = {"Quick", "Comprehensive", "Security", "Performance"}
 
 
 def create_review_blueprint(
-    gitlab_service: GitLabService | None = None,
-    claude_service: ClaudeService | None = None,
-    audit_service: AuditService | None = None,
-    rules_service: RulesManagementService | None = None,
     gitlab: GitLabService | None = None,
     ai: AIReviewService | None = None,
     audit: AuditService | None = None,
@@ -49,10 +37,10 @@ def create_review_blueprint(
 
     blueprint = Blueprint("review", __name__)
 
-    configured_gitlab = gitlab or gitlab_service
+    configured_gitlab = gitlab
     configured_ai = ai
-    configured_audit = audit or audit_service
-    configured_rules = rules or rules_service
+    configured_audit = audit
+    configured_rules = rules
     configured_generator = rules_generator
 
     @blueprint.post("/api/review")
@@ -84,87 +72,38 @@ def create_review_blueprint(
         if not isinstance(requirements, (list, str)):
             return jsonify({"error": "requirements must be a string or list."}), 400
 
-        if configured_ai is not None:
-            if configured_gitlab is None:
-                return jsonify({"error": "GitLab service is unavailable."}), 503
-            try:
-                project_path, mr_iid = configured_gitlab.parse_mr_url(mr_url)
-                metadata = configured_gitlab.get_mr_details(project_path, mr_iid)
-                diff = configured_gitlab.get_mr_diff(project_path, mr_iid)
-                rules_document = configured_ai.load_rules(
-                    current_app.config.get("REVIEW_RULES_FILE", "review_rules.yaml")
-                )
-                generated = configured_ai.generate_review(
-                    metadata, diff, rules_document, review_type.lower(), requirements
-                )
-                review_id = configured_audit.log_review(
-                    mr_url, str(metadata.get("title") or ""), str(metadata.get("author") or ""),
-                    review_type, {**generated, "diff": diff},
-                ) if configured_audit else None
-                session["last_review"] = {"mr_url": mr_url, "project_path": project_path, "mr_iid": mr_iid, "review": generated}
-                return jsonify({**generated, "review_id": review_id, "mr": metadata})
-            except (AIServiceError, GitLabAPIError, GitLabConfigurationError, GitLabAuthenticationError) as exc:
-                return jsonify({"error": str(exc)}), 502
-            except InvalidMergeRequestURLError as exc:
-                return jsonify({"error": str(exc)}), 400
-
-        gitlab = gitlab_service or GitLabService()
-        claude = claude_service or _create_claude_service()
-        audit = audit_service or AuditService()
-
+        if configured_gitlab is None or configured_ai is None:
+            return jsonify({"error": "Review services are unavailable."}), 503
         try:
-            gitlab.parse_merge_request_url(mr_url)
-            metadata = gitlab.get_merge_request_metadata(mr_url)
-            changes = gitlab.get_merge_request_changes(mr_url)
-            if rules is None:
-                rules = claude.load_review_rules()
-            review_content = claude.review_merge_request(
-                metadata=metadata,
-                combined_diff=changes["combined_diff"],
-                review_type=review_type,
-                review_rules=rules,
-                requirements=requirements,
+            project_path, mr_iid = configured_gitlab.parse_mr_url(mr_url)
+            metadata = configured_gitlab.get_mr_details(project_path, mr_iid)
+            diff = configured_gitlab.get_mr_diff(project_path, mr_iid)
+            rules_document = (
+                configured_rules.get_current_rules()
+                if configured_rules is not None
+                else configured_ai.load_rules("app/review_rules.yaml")
             )
-            record = audit.log_review(
-                mr_url=mr_url,
-                mr_title=str(metadata.get("title") or ""),
-                mr_author=str(metadata.get("author") or ""),
-                review_type=review_type,
-                review_content=review_content,
-                diff=changes["combined_diff"],
+            generated = configured_ai.generate_review(
+                metadata, diff, rules_document, review_type.lower(),
+                "\n".join(requirements) if isinstance(requirements, list) else requirements,
             )
+            review_id = configured_audit.log_review(
+                mr_url, str(metadata.get("title") or ""), str(metadata.get("author") or ""),
+                review_type, {**generated, "diff": diff},
+            ) if configured_audit else None
+            session["last_review"] = {"mr_url": mr_url, "project_path": project_path, "mr_iid": mr_iid, "review": generated}
+            return jsonify({**generated, "review_id": review_id, "mr": metadata})
         except InvalidMergeRequestURLError as exc:
             return jsonify({"error": str(exc)}), 400
-        except UnsupportedReviewTypeError as exc:
-            return jsonify({"error": str(exc)}), 400
         except (
+            AIServiceError,
             GitLabAuthenticationError,
             GitLabConfigurationError,
             GitLabAPIError,
         ) as exc:
             return jsonify({"error": str(exc)}), 502
-        except (ClaudeAPIError, ClaudeConfigurationError) as exc:
-            return jsonify({"error": str(exc)}), 502
         except (OSError, ValueError) as exc:
             return jsonify({"error": str(exc)}), 500
-
-        return jsonify(
-            {
-                "review": review_content,
-                "mr": {
-                    "url": mr_url,
-                    "title": metadata.get("title"),
-                    "author": metadata.get("author"),
-                    "web_url": metadata.get("web_url"),
-                },
-                "review_metadata": {
-                    "review_id": record["review_id"],
-                    "review_type": record["review_type"],
-                    "timestamp": record["timestamp"],
-                    "diff_hash": record["diff_hash"],
-                },
-            }
-        )
 
     @blueprint.post("/api/post-review")
     def post_review() -> tuple[Any, int] | Any:
@@ -174,33 +113,18 @@ def create_review_blueprint(
         if not isinstance(payload, dict):
             return jsonify({"error": "Request body must be a JSON object."}), 400
 
-        mr_url = payload.get("mr_url")
-        review_content = payload.get("review_content")
-        if not isinstance(mr_url, str) or not mr_url.strip():
-            return jsonify({"error": "mr_url is required."}), 400
-        if not isinstance(review_content, str) or not review_content.strip():
-            return jsonify({"error": "review_content is required."}), 400
-
-        if configured_ai is not None:
-            last_review = session.get("last_review", {})
-            mr_url = payload.get("mr_url") or last_review.get("mr_url")
-            review = payload.get("review") or last_review.get("review")
-            if not isinstance(mr_url, str) or not isinstance(review, dict):
-                return jsonify({"error": "No last review is available to post."}), 400
-            if configured_gitlab is None:
-                return jsonify({"error": "GitLab service is unavailable."}), 503
-            try:
-                project_path, mr_iid = configured_gitlab.parse_mr_url(mr_url)
-                body = configured_ai.format_for_gitlab(review)
-                result = configured_gitlab.post_comment(project_path, mr_iid, body)
-                return jsonify({"status": "posted", "mr_url": mr_url, "note": result})
-            except (GitLabAPIError, GitLabAuthenticationError, GitLabConfigurationError) as exc:
-                return jsonify({"error": str(exc)}), 502
-
-        gitlab = gitlab_service or GitLabService()
+        last_review = session.get("last_review", {})
+        mr_url = payload.get("mr_url") or last_review.get("mr_url")
+        review = payload.get("review") or last_review.get("review")
+        if not isinstance(mr_url, str) or not isinstance(review, dict):
+            return jsonify({"error": "No last review is available to post."}), 400
+        if configured_gitlab is None or configured_ai is None:
+            return jsonify({"error": "Review services are unavailable."}), 503
         try:
-            gitlab.parse_merge_request_url(mr_url)
-            gitlab.post_merge_request_comment(mr_url, review_content)
+            project_path, mr_iid = configured_gitlab.parse_mr_url(mr_url)
+            body = configured_ai.format_for_gitlab(review)
+            result = configured_gitlab.post_comment(project_path, mr_iid, body)
+            return jsonify({"status": "posted", "mr_url": mr_url, "note": result})
         except InvalidMergeRequestURLError as exc:
             return jsonify({"error": str(exc)}), 400
         except (
@@ -212,15 +136,13 @@ def create_review_blueprint(
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
-        return jsonify({"status": "posted", "mr_url": mr_url})
-
     @blueprint.get("/api/rules")
     @blueprint.get("/api/rules/list")
     def list_rules() -> Any:
         """List the default and custom rule sets."""
 
         try:
-            service = rules_service or RulesManagementService()
+            service = configured_rules or RulesManagementService()
             return jsonify({"rule_sets": service.list_rule_sets()})
         except RulesManagementError:
             return jsonify({"error": "Unable to list rule sets."}), 500
@@ -229,7 +151,7 @@ def create_review_blueprint(
     def current_rules() -> tuple[Any, int] | Any:
         """Return the currently selected validated rule set."""
 
-        service = rules_service or RulesManagementService()
+        service = configured_rules or RulesManagementService()
         try:
             rules = service.get_current_rules()
             filename = service.download_current()[1]
@@ -246,7 +168,7 @@ def create_review_blueprint(
         """Download the currently selected rules as YAML."""
 
         try:
-            content, filename = (rules_service or RulesManagementService()).download_current()
+            content, filename = (configured_rules or RulesManagementService()).download_current()
         except RuleSetNotFoundError:
             return jsonify({"error": "Current rule set was not found."}), 404
         except RulesManagementError:
@@ -263,7 +185,7 @@ def create_review_blueprint(
         """Download the currently selected rules as Markdown."""
 
         try:
-            content = (rules_service or RulesManagementService()).export_current_markdown()
+            content = (configured_rules or RulesManagementService()).export_current_markdown()
         except RuleSetNotFoundError:
             return jsonify({"error": "Current rule set was not found."}), 404
         except RulesManagementError:
@@ -475,10 +397,6 @@ def create_review_blueprint(
 
 def register_routes(
     app: Flask,
-    gitlab_service: GitLabService | None = None,
-    claude_service: ClaudeService | None = None,
-    audit_service: AuditService | None = None,
-    rules_service: RulesManagementService | None = None,
     gitlab: GitLabService | None = None,
     ai: AIReviewService | None = None,
     audit: AuditService | None = None,
@@ -489,10 +407,6 @@ def register_routes(
 
     app.register_blueprint(
         create_review_blueprint(
-            gitlab_service=gitlab_service,
-            claude_service=claude_service,
-            audit_service=audit_service,
-            rules_service=rules_service,
             gitlab=gitlab,
             ai=ai,
             audit=audit,
@@ -500,10 +414,3 @@ def register_routes(
             rules_generator=rules_generator,
         )
     )
-
-
-def _create_claude_service() -> ClaudeService:
-    """Create ClaudeService from app configuration without inventing a model."""
-
-    model = current_app.config.get("CLAUDE_MODEL", "")
-    return ClaudeService(model=model, config=Config)
