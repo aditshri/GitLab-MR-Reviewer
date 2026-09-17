@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from flask import Blueprint, Flask, Response, current_app, jsonify, request
+from flask import Blueprint, Flask, Response, current_app, jsonify, redirect, render_template, request, session
 
 from app.audit_service import AuditService
+from app.ai_service import AIReviewService, AIServiceError
 from app.claude_service import (
     ClaudeAPIError,
     ClaudeConfigurationError,
@@ -27,6 +28,7 @@ from app.rules_management_service import (
     RulesManagementService,
     UnsafeRuleSetNameError,
 )
+from app.rules_generator import RulesGenerator
 from config import Config
 
 SUPPORTED_REVIEW_TYPES = {"Quick", "Comprehensive", "Security", "Performance"}
@@ -37,10 +39,21 @@ def create_review_blueprint(
     claude_service: ClaudeService | None = None,
     audit_service: AuditService | None = None,
     rules_service: RulesManagementService | None = None,
+    gitlab: GitLabService | None = None,
+    ai: AIReviewService | None = None,
+    audit: AuditService | None = None,
+    rules: RulesManagementService | None = None,
+    rules_generator: RulesGenerator | None = None,
 ) -> Blueprint:
     """Create the review blueprint with optional service dependencies."""
 
     blueprint = Blueprint("review", __name__)
+
+    configured_gitlab = gitlab or gitlab_service
+    configured_ai = ai
+    configured_audit = audit or audit_service
+    configured_rules = rules or rules_service
+    configured_generator = rules_generator
 
     @blueprint.post("/api/review")
     def review() -> tuple[Any, int] | Any:
@@ -54,7 +67,14 @@ def create_review_blueprint(
         review_type = payload.get("review_type")
         if not isinstance(mr_url, str) or not mr_url.strip():
             return jsonify({"error": "mr_url is required."}), 400
-        if not isinstance(review_type, str) or review_type not in SUPPORTED_REVIEW_TYPES:
+        valid_review_type = (
+            isinstance(review_type, str)
+            and (
+                review_type in SUPPORTED_REVIEW_TYPES
+                or (configured_ai is not None and review_type.lower() in {"quick", "comprehensive", "security", "performance"})
+            )
+        )
+        if not valid_review_type:
             return jsonify({"error": "review_type is invalid."}), 400
 
         rules = payload.get("review_rules")
@@ -63,6 +83,30 @@ def create_review_blueprint(
             return jsonify({"error": "review_rules must be a string, list, or object."}), 400
         if not isinstance(requirements, (list, str)):
             return jsonify({"error": "requirements must be a string or list."}), 400
+
+        if configured_ai is not None:
+            if configured_gitlab is None:
+                return jsonify({"error": "GitLab service is unavailable."}), 503
+            try:
+                project_path, mr_iid = configured_gitlab.parse_mr_url(mr_url)
+                metadata = configured_gitlab.get_mr_details(project_path, mr_iid)
+                diff = configured_gitlab.get_mr_diff(project_path, mr_iid)
+                rules_document = configured_ai.load_rules(
+                    current_app.config.get("REVIEW_RULES_FILE", "review_rules.yaml")
+                )
+                generated = configured_ai.generate_review(
+                    metadata, diff, rules_document, review_type.lower(), requirements
+                )
+                review_id = configured_audit.log_review(
+                    mr_url, str(metadata.get("title") or ""), str(metadata.get("author") or ""),
+                    review_type, {**generated, "diff": diff},
+                ) if configured_audit else None
+                session["last_review"] = {"mr_url": mr_url, "project_path": project_path, "mr_iid": mr_iid, "review": generated}
+                return jsonify({**generated, "review_id": review_id, "mr": metadata})
+            except (AIServiceError, GitLabAPIError, GitLabConfigurationError, GitLabAuthenticationError) as exc:
+                return jsonify({"error": str(exc)}), 502
+            except InvalidMergeRequestURLError as exc:
+                return jsonify({"error": str(exc)}), 400
 
         gitlab = gitlab_service or GitLabService()
         claude = claude_service or _create_claude_service()
@@ -137,6 +181,22 @@ def create_review_blueprint(
         if not isinstance(review_content, str) or not review_content.strip():
             return jsonify({"error": "review_content is required."}), 400
 
+        if configured_ai is not None:
+            last_review = session.get("last_review", {})
+            mr_url = payload.get("mr_url") or last_review.get("mr_url")
+            review = payload.get("review") or last_review.get("review")
+            if not isinstance(mr_url, str) or not isinstance(review, dict):
+                return jsonify({"error": "No last review is available to post."}), 400
+            if configured_gitlab is None:
+                return jsonify({"error": "GitLab service is unavailable."}), 503
+            try:
+                project_path, mr_iid = configured_gitlab.parse_mr_url(mr_url)
+                body = configured_ai.format_for_gitlab(review)
+                result = configured_gitlab.post_comment(project_path, mr_iid, body)
+                return jsonify({"status": "posted", "mr_url": mr_url, "note": result})
+            except (GitLabAPIError, GitLabAuthenticationError, GitLabConfigurationError) as exc:
+                return jsonify({"error": str(exc)}), 502
+
         gitlab = gitlab_service or GitLabService()
         try:
             gitlab.parse_merge_request_url(mr_url)
@@ -155,6 +215,7 @@ def create_review_blueprint(
         return jsonify({"status": "posted", "mr_url": mr_url})
 
     @blueprint.get("/api/rules")
+    @blueprint.get("/api/rules/list")
     def list_rules() -> Any:
         """List the default and custom rule sets."""
 
@@ -197,6 +258,7 @@ def create_review_blueprint(
         )
 
     @blueprint.get("/api/rules/markdown")
+    @blueprint.get("/api/rules/export-markdown")
     def export_rules_markdown() -> Response | tuple[Any, int]:
         """Download the currently selected rules as Markdown."""
 
@@ -217,7 +279,8 @@ def create_review_blueprint(
         """Read raw YAML content for one rule set."""
 
         try:
-            service = rules_service or RulesManagementService()
+            filename = request.args.get("filename", filename)
+            service = configured_rules or RulesManagementService()
             content = service.read_rule_content(filename)
             return jsonify({"filename": filename, "content": content})
         except RuleSetNotFoundError:
@@ -227,7 +290,21 @@ def create_review_blueprint(
         except RulesManagementError:
             return jsonify({"error": "Unable to read rule set."}), 500
 
+    @blueprint.get("/api/rules/content")
+    def read_current_rules_content() -> tuple[Any, int] | Any:
+        """Return the selected rule set's raw YAML content."""
+
+        service = configured_rules or RulesManagementService()
+        filename = request.args.get("filename", "default.yaml")
+        try:
+            return jsonify({"filename": filename, "content": service.read_rule_content(filename)})
+        except RuleSetNotFoundError:
+            return jsonify({"error": "Rule set was not found."}), 404
+        except RulesManagementError:
+            return jsonify({"error": "Unable to read rule set."}), 500
+
     @blueprint.post("/api/rules")
+    @blueprint.post("/api/rules/save")
     def save_rules() -> tuple[Any, int] | Any:
         """Save validated YAML content or a structured rule set."""
 
@@ -237,7 +314,7 @@ def create_review_blueprint(
         filename = payload.get("filename")
         if not isinstance(filename, str) or not filename.strip():
             return jsonify({"error": "filename is required."}), 400
-        service = rules_service or RulesManagementService()
+        service = configured_rules or RulesManagementService()
         try:
             if isinstance(payload.get("content"), str):
                 info = service.save_content(filename, payload["content"])
@@ -265,7 +342,7 @@ def create_review_blueprint(
         if not isinstance(content, str):
             return jsonify({"error": "content is required."}), 400
         try:
-            info = (rules_service or RulesManagementService()).upload_content(filename, content)
+            info = (configured_rules or RulesManagementService()).upload_content(filename, content)
             return jsonify(info)
         except (InvalidRuleSetError, UnsafeRuleSetNameError) as exc:
             return jsonify({"error": str(exc)}), 400
@@ -277,7 +354,7 @@ def create_review_blueprint(
         """Select the bundled default rule set."""
 
         try:
-            return jsonify((rules_service or RulesManagementService()).reset_to_default())
+            return jsonify((configured_rules or RulesManagementService()).reset_to_default())
         except RuleSetNotFoundError:
             return jsonify({"error": "Default rule set was not found."}), 404
         except (InvalidRuleSetError, UnsafeRuleSetNameError):
@@ -290,7 +367,8 @@ def create_review_blueprint(
         """Delete one custom rule set."""
 
         try:
-            (rules_service or RulesManagementService()).delete_custom_rules(filename)
+            filename = request.args.get("filename", filename)
+            (configured_rules or RulesManagementService()).delete_custom_rules(filename)
             return jsonify({"status": "deleted", "filename": filename})
         except RuleSetNotFoundError:
             return jsonify({"error": "Rule set was not found."}), 404
@@ -298,6 +376,99 @@ def create_review_blueprint(
             return jsonify({"error": str(exc)}), 400
         except RulesManagementError:
             return jsonify({"error": "Unable to delete rule set."}), 500
+
+    @blueprint.delete("/api/rules/delete")
+    @blueprint.post("/api/rules/delete")
+    def delete_rules_by_query() -> tuple[Any, int] | Any:
+        """Delete a custom rule set named by the query string."""
+
+        payload = request.get_json(silent=True) or {}
+        filename = payload.get("filename") or request.args.get("filename")
+        if not filename:
+            return jsonify({"error": "filename is required."}), 400
+        return delete_rules(filename)
+
+    @blueprint.post("/api/rules/generate-from-user")
+    def generate_user_rules() -> tuple[Any, int] | Any:
+        payload = request.get_json(silent=True) or {}
+        if configured_generator is None:
+            return jsonify({"error": "Rules generator is unavailable."}), 503
+        project_path = payload.get("project_path")
+        username = payload.get("username")
+        if not isinstance(project_path, str) or not isinstance(username, str):
+            return jsonify({"error": "project_path and username are required."}), 400
+        try:
+            return jsonify(configured_generator.generate_from_user_history(project_path, username, payload.get("limit", 50)))
+        except (ValueError, GitLabAPIError, GitLabAuthenticationError) as exc:
+            return jsonify({"error": str(exc)}), 502
+
+    @blueprint.post("/api/rules/generate-from-project")
+    def generate_project_rules() -> tuple[Any, int] | Any:
+        payload = request.get_json(silent=True) or {}
+        if configured_generator is None or not isinstance(payload.get("project_path"), str):
+            return jsonify({"error": "project_path is required."}), 400
+        try:
+            return jsonify(configured_generator.generate_from_project_history(payload["project_path"], payload.get("limit", 100)))
+        except (ValueError, GitLabAPIError, GitLabAuthenticationError) as exc:
+            return jsonify({"error": str(exc)}), 502
+
+    @blueprint.post("/api/rules/generate-from-project-consolidated")
+    def generate_consolidated_rules() -> tuple[Any, int] | Any:
+        payload = request.get_json(silent=True) or {}
+        if configured_generator is None or not isinstance(payload.get("project_path"), str):
+            return jsonify({"error": "project_path is required."}), 400
+        try:
+            return jsonify(configured_generator.generate_consolidated_rules(payload["project_path"]))
+        except (ValueError, GitLabAPIError, GitLabAuthenticationError) as exc:
+            return jsonify({"error": str(exc)}), 502
+
+    @blueprint.get("/api/audit/trail/<path:mr_url>")
+    def audit_trail(mr_url: str) -> Any:
+        return jsonify(configured_audit.get_trail(mr_url) if configured_audit else [])
+
+    @blueprint.get("/api/audit/review/<review_id>")
+    def audit_review(review_id: str) -> tuple[Any, int] | Any:
+        review = configured_audit.get_review(review_id) if configured_audit else None
+        return (jsonify(review), 200) if review else (jsonify({"error": "Review not found."}), 404)
+
+    @blueprint.get("/api/audit/recent")
+    def audit_recent() -> Any:
+        limit = request.args.get("limit", default=50, type=int)
+        return jsonify(configured_audit.get_recent(limit) if configured_audit else [])
+
+    @blueprint.get("/api/audit/summary/<path:mr_url>")
+    def audit_summary(mr_url: str) -> Any:
+        return jsonify(configured_audit.get_summary(mr_url) if configured_audit else {})
+
+    @blueprint.get("/api/audit/export/<path:mr_url>")
+    def audit_export(mr_url: str) -> Any:
+        export_format = request.args.get("format", "json")
+        try:
+            return jsonify({"path": configured_audit.export(mr_url, export_format)}) if configured_audit else jsonify({"error": "Audit service unavailable."}), 503
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @blueprint.get("/")
+    def index() -> str:
+        return render_template("index.html")
+
+    @blueprint.get("/about")
+    def about() -> str:
+        return render_template("about.html")
+
+    @blueprint.get("/api/health")
+    def health() -> Any:
+        gitlab_connected = False
+        if configured_gitlab is not None:
+            try:
+                gitlab_connected = configured_gitlab.validate_connection()
+            except Exception:
+                gitlab_connected = False
+        return jsonify({
+            "status": "ok",
+            "gitlab_connected": gitlab_connected,
+            "ai_configured": configured_ai is not None,
+        })
 
     return blueprint
 
@@ -308,6 +479,11 @@ def register_routes(
     claude_service: ClaudeService | None = None,
     audit_service: AuditService | None = None,
     rules_service: RulesManagementService | None = None,
+    gitlab: GitLabService | None = None,
+    ai: AIReviewService | None = None,
+    audit: AuditService | None = None,
+    rules: RulesManagementService | None = None,
+    rules_generator: RulesGenerator | None = None,
 ) -> None:
     """Register the review blueprint on a Flask application."""
 
@@ -317,6 +493,11 @@ def register_routes(
             claude_service=claude_service,
             audit_service=audit_service,
             rules_service=rules_service,
+            gitlab=gitlab,
+            ai=ai,
+            audit=audit,
+            rules=rules,
+            rules_generator=rules_generator,
         )
     )
 
