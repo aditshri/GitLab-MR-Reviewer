@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from typing import Any, TypedDict
 from urllib.parse import unquote, urlsplit
 
@@ -11,6 +12,9 @@ from gitlab.exceptions import GitlabAuthenticationError as GitlabAuthError
 from gitlab.exceptions import GitlabError
 
 from config import Config
+
+
+logger = logging.getLogger(__name__)
 
 
 class GitLabServiceError(Exception):
@@ -55,24 +59,28 @@ class GitLabService:
     """Provide authenticated access to GitLab merge request metadata."""
 
     def __init__(self, config: type[Config] = Config) -> None:
-        """Initialize a GitLab client from environment-backed configuration."""
+        """Initialize a GitLab client without blocking application startup."""
 
-        if not config.GITLAB_URL:
-            raise GitLabConfigurationError("GITLAB_URL is not configured.")
-        if not config.GITLAB_TOKEN:
-            raise GitLabConfigurationError("GITLAB_TOKEN is not configured.")
+        self._gitlab_url = (getattr(config, "GITLAB_URL", "") or "").rstrip("/")
+        self._gitlab_token = getattr(config, "GITLAB_TOKEN", None)
+        self._client: gitlab.Gitlab | None = None
+        self._initialization_error: Exception | None = None
 
-        self._gitlab_url = config.GITLAB_URL.rstrip("/")
-        self._client = gitlab.Gitlab(
-            self._gitlab_url,
-            private_token=config.GITLAB_TOKEN,
-        )
+        try:
+            self._client = gitlab.Gitlab(
+                self._gitlab_url,
+                private_token=self._gitlab_token,
+            )
+        except Exception as exc:  # python-gitlab can raise several init errors.
+            self._initialization_error = exc
+            logger.exception("Unable to initialize the GitLab client.")
 
     def validate_connection(self) -> bool:
         """Authenticate with GitLab and return whether the connection is valid."""
 
+        client = self._require_client()
         try:
-            self._client.auth()
+            client.auth()
         except GitlabAuthError as exc:
             raise GitLabAuthenticationError(
                 "GitLab authentication failed."
@@ -84,8 +92,16 @@ class GitLabService:
 
         return True
 
+    def parse_mr_url(self, mr_url: str) -> tuple[str, int]:
+        """Extract a project path and merge request IID from a GitLab URL."""
+
+        return self.parse_merge_request_url(mr_url)
+
     def parse_merge_request_url(self, merge_request_url: str) -> tuple[str, int]:
         """Extract the project path and merge request IID from a GitLab URL."""
+
+        if not self._gitlab_url:
+            raise GitLabConfigurationError("GITLAB_URL is not configured.")
 
         configured = urlsplit(self._gitlab_url)
         parsed = urlsplit(merge_request_url.strip())
@@ -128,35 +144,50 @@ class GitLabService:
         project_path = unquote(match.group("project_path"))
         return project_path, int(match.group("iid"))
 
-    def get_merge_request_metadata(self, merge_request_url: str) -> dict[str, Any]:
-        """Retrieve basic metadata for the merge request identified by its URL."""
+    def get_mr_details(self, project_path: str, mr_iid: int) -> dict[str, Any]:
+        """Retrieve the requested merge request metadata."""
 
-        project_path, merge_request_iid = self.parse_merge_request_url(
-            merge_request_url
-        )
-
-        try:
-            project = self._client.projects.get(project_path)
-            merge_request = project.mergerequests.get(merge_request_iid)
-        except GitlabError as exc:
-            raise GitLabAPIError(
-                "Unable to retrieve merge request metadata from GitLab."
-            ) from exc
-
+        merge_request = self._get_merge_request(project_path, mr_iid)
         author = getattr(merge_request, "author", None) or {}
-        author_name = author.get("name") or author.get("username")
+        if isinstance(author, dict):
+            author = author.get("name") or author.get("username")
 
         return {
             "title": getattr(merge_request, "title", None),
             "description": getattr(merge_request, "description", None),
-            "author": author_name,
+            "author": author,
             "source_branch": getattr(merge_request, "source_branch", None),
             "target_branch": getattr(merge_request, "target_branch", None),
-            "state": getattr(merge_request, "state", None),
             "web_url": getattr(merge_request, "web_url", None),
-            "created_at": getattr(merge_request, "created_at", None),
-            "updated_at": getattr(merge_request, "updated_at", None),
         }
+
+    def get_merge_request_metadata(self, merge_request_url: str) -> dict[str, Any]:
+        """Retrieve basic metadata for the merge request identified by its URL."""
+
+        project_path, merge_request_iid = self.parse_mr_url(merge_request_url)
+        return self.get_mr_details(project_path, merge_request_iid)
+
+    def get_mr_diff(self, project_path: str, mr_iid: int) -> str:
+        """Return all changed-file diffs as one LLM-ready string."""
+
+        merge_request = self._get_merge_request(project_path, mr_iid)
+        try:
+            changes_payload = merge_request.changes()
+        except GitlabError as exc:
+            raise self._api_error(exc, "merge request changes") from exc
+
+        if not isinstance(changes_payload, dict):
+            raise GitLabAPIError("GitLab returned an invalid merge request changes response.")
+        changes = changes_payload.get("changes", [])
+        if not isinstance(changes, list):
+            raise GitLabAPIError("GitLab returned an invalid merge request changes list.")
+
+        diffs = [
+            str(change.get("diff", ""))
+            for change in changes
+            if isinstance(change, dict)
+        ]
+        return "\n".join(diffs)
 
     def post_merge_request_comment(
         self,
@@ -165,20 +196,25 @@ class GitLabService:
     ) -> dict[str, Any]:
         """Post review content as a note on the identified merge request."""
 
-        project_path, merge_request_iid = self.parse_merge_request_url(
-            merge_request_url
-        )
-        if not review_content.strip():
-            raise ValueError("review_content is required.")
+        project_path, merge_request_iid = self.parse_mr_url(merge_request_url)
+        return self.post_comment(project_path, merge_request_iid, review_content)
 
+    def post_comment(
+        self,
+        project_path: str,
+        mr_iid: int,
+        comment_body: str,
+    ) -> dict[str, Any]:
+        """Post a note to a merge request and return GitLab's note data."""
+
+        if not comment_body.strip():
+            raise ValueError("comment_body is required.")
+
+        merge_request = self._get_merge_request(project_path, mr_iid)
         try:
-            project = self._client.projects.get(project_path)
-            merge_request = project.mergerequests.get(merge_request_iid)
-            note = merge_request.notes.create({"body": review_content})
+            note = merge_request.notes.create({"body": comment_body})
         except GitlabError as exc:
-            raise GitLabAPIError(
-                "Unable to post the review to GitLab."
-            ) from exc
+            raise self._api_error(exc, "merge request comment") from exc
 
         attributes = getattr(note, "attributes", {})
         return dict(attributes) if isinstance(attributes, dict) else {}
@@ -188,18 +224,13 @@ class GitLabService:
     ) -> MergeRequestChanges:
         """Retrieve normalized changed files and combined diff text for an MR."""
 
-        project_path, merge_request_iid = self.parse_merge_request_url(
-            merge_request_url
-        )
+        project_path, merge_request_iid = self.parse_mr_url(merge_request_url)
+        merge_request = self._get_merge_request(project_path, merge_request_iid)
 
         try:
-            project = self._client.projects.get(project_path)
-            merge_request = project.mergerequests.get(merge_request_iid)
             changes_payload = merge_request.changes()
         except GitlabError as exc:
-            raise GitLabAPIError(
-                "Unable to retrieve merge request changes from GitLab."
-            ) from exc
+            raise self._api_error(exc, "merge request changes") from exc
 
         if not isinstance(changes_payload, dict):
             raise GitLabAPIError("GitLab returned an invalid merge request changes response.")
@@ -244,3 +275,54 @@ class GitLabService:
             "files": changed_files,
             "combined_diff": "\n".join(file["diff"] for file in changed_files),
         }
+
+    def _require_client(self) -> gitlab.Gitlab:
+        """Return the client or raise a clear configuration/authentication error."""
+
+        if not self._gitlab_token:
+            raise GitLabAuthenticationError(
+                "GitLab authentication failed: GITLAB_TOKEN is missing."
+            )
+        if self._client is None:
+            raise GitLabServiceError(
+                "GitLab client initialization failed. Check GITLAB_URL."
+            ) from self._initialization_error
+        return self._client
+
+    def _get_project(self, project_path: str) -> Any:
+        """Retrieve a project while translating GitLab errors into service errors."""
+
+        client = self._require_client()
+        try:
+            return client.projects.get(project_path)
+        except GitlabError as exc:
+            raise self._api_error(exc, f"GitLab project '{project_path}'") from exc
+
+    def _get_merge_request(self, project_path: str, mr_iid: int) -> Any:
+        """Retrieve an MR after resolving its project."""
+
+        project = self._get_project(project_path)
+        try:
+            return project.mergerequests.get(mr_iid)
+        except GitlabError as exc:
+            raise self._api_error(
+                exc,
+                f"GitLab merge request !{mr_iid} in project '{project_path}'",
+            ) from exc
+
+    @staticmethod
+    def _api_error(exc: GitlabError, resource: str) -> GitLabServiceError:
+        """Map common python-gitlab failures to human-readable service errors."""
+
+        response_code = getattr(exc, "response_code", None)
+        if isinstance(exc, GitlabAuthError) or response_code in {401, 403}:
+            return GitLabAuthenticationError(
+                "GitLab authentication failed. Check GITLAB_TOKEN."
+            )
+        if response_code == 404:
+            if resource.startswith("GitLab project"):
+                return GitLabAPIError(f"GitLab project not found: {resource}.")
+            if resource.startswith("GitLab merge request"):
+                return GitLabAPIError(f"GitLab merge request not found: {resource}.")
+            return GitLabAPIError(f"GitLab resource not found: {resource}.")
+        return GitLabAPIError(f"GitLab request failed while accessing {resource}.")
