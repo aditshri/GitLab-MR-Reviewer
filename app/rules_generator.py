@@ -6,7 +6,12 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
-from typing import Any, Literal, TypedDict
+from pathlib import Path
+from typing import Any, Literal, TypedDict, cast
+
+import yaml
+
+from app.gitlab_service import GitLabService
 
 from app.review_rules_service import (
     DEFAULT_REVIEW_RULES,
@@ -112,6 +117,39 @@ class RulesAnalysis(TypedDict):
 class RulesGenerator:
     """Normalize review comments and extract recurring feedback patterns."""
 
+    def __init__(self, gitlab_service: GitLabService | None = None) -> None:
+        """Create a generator with an optional GitLab history provider."""
+
+        self.gitlab_service = gitlab_service
+
+    def generate_from_user_history(
+        self,
+        project_path: str,
+        username: str,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Generate current-schema rules from one reviewer's project history."""
+
+        comments = self._get_history(project_path, username=username, limit=limit)
+        return self._generate_rules_document(comments, subject=username)
+
+    def generate_from_project_history(
+        self,
+        project_path: str,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Generate current-schema rules from all reviewers in a project."""
+
+        comments = self._get_history(project_path, username=None, limit=limit)
+        return self._generate_rules_document(comments, subject=project_path)
+
+    def generate_consolidated_rules(self, project_path: str) -> dict[str, Any]:
+        """Merge project-derived rules into the repository's default rules."""
+
+        generated = self.generate_from_project_history(project_path)
+        defaults = self._load_default_rules()
+        return self._merge_rule_documents(defaults, generated)
+
     def analyze_reviewer_comments(
         self,
         comments: Iterable[Mapping[str, Any]],
@@ -127,6 +165,92 @@ class RulesGenerator:
                 if self._comment_reviewer(comment) == reviewer
             ]
         return self._analyze(selected, scope="reviewer", subject=reviewer)
+
+    def _get_history(
+        self,
+        project_path: str,
+        username: str | None,
+        limit: int,
+    ) -> Iterable[Mapping[str, Any]]:
+        if self.gitlab_service is None:
+            raise ValueError("A GitLabService is required for history-based generation.")
+        return self.gitlab_service.get_review_comments(
+            project_path,
+            username=username,
+            limit=limit,
+        )
+
+    def _generate_rules_document(
+        self,
+        comments: Iterable[Mapping[str, Any]],
+        subject: str,
+    ) -> dict[str, Any]:
+        """Count simple keyword categories and place recurring feedback in rules."""
+
+        document = self._load_default_rules()
+        patterns = self._analyze(comments, scope="project", subject=subject)["patterns"]
+        generated_by_category: dict[str, list[str]] = defaultdict(list)
+        for pattern in patterns:
+            category = self._rule_category(pattern["category"])
+            generated_by_category[category].append(
+                f"{pattern['normalized_feedback']} (seen {pattern['occurrences']} times)"
+            )
+
+        for category, generated in generated_by_category.items():
+            if category in document and isinstance(document[category], dict):
+                existing = document[category].setdefault("rules", [])
+                existing.extend(item for item in generated if item not in existing)
+            else:
+                document[category] = {"rules": generated}
+        document["general"]["generated_from"] = subject
+        return document
+
+    @staticmethod
+    def _load_default_rules() -> dict[str, Any]:
+        """Load the root current-schema rules file, with a small safe fallback."""
+
+        path = Path(__file__).resolve().parent.parent / "review_rules.yaml"
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if isinstance(document, dict):
+                return deepcopy(document)
+        except (OSError, yaml.YAMLError):
+            pass
+        return {
+            "general": {
+                "team_name": "Default",
+                "enabled_categories": ["code_quality", "security", "performance", "testing"],
+            },
+            "security": {"strict_mode": False},
+            "testing": {"min_coverage_percent": 70},
+            "output": {
+                "include_positive_feedback": True,
+                "severity_levels": ["critical", "high", "medium", "low"],
+            },
+            "ai_behavior": {
+                "tone": "constructive",
+                "detail_level": "comprehensive",
+                "suggest_improvements": True,
+            },
+        }
+
+    @classmethod
+    def _merge_rule_documents(
+        cls,
+        defaults: dict[str, Any],
+        generated: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Recursively merge generated lists while avoiding duplicate entries."""
+
+        merged = deepcopy(defaults)
+        for key, generated_value in generated.items():
+            if key not in merged:
+                merged[key] = deepcopy(generated_value)
+            elif isinstance(merged[key], dict) and isinstance(generated_value, dict):
+                merged[key] = cls._merge_rule_documents(merged[key], generated_value)
+            elif isinstance(merged[key], list) and isinstance(generated_value, list):
+                merged[key].extend(item for item in generated_value if item not in merged[key])
+        return merged
 
     def analyze_project_comments(
         self,
@@ -234,7 +358,7 @@ class RulesGenerator:
             "subject": subject,
             "comment_count": len(normalized_comments),
             "comments": normalized_comments,
-            "patterns": patterns,
+            "patterns": cast(list[ReviewPattern], patterns),
         }
 
     @staticmethod

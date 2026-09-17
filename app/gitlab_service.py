@@ -229,6 +229,8 @@ class GitLabService:
 
         if limit < 0:
             raise ValueError("limit must not be negative.")
+        if limit == 0:
+            return []
         project = self._get_project(project_path)
         try:
             merge_requests = project.mergerequests.list(state="all", all=True)
