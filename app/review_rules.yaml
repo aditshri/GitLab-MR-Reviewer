@@ -1,0 +1,26 @@
+general:
+  tone: professional
+  detail_level: balanced
+  suggest_improvements: true
+
+team:
+  name: default
+  guidance: []
+
+rules:
+  code_quality:
+    - id: clear-maintainable-code
+      severity: medium
+      description: Prefer clear, maintainable code with focused responsibilities.
+  security:
+    - id: protect-sensitive-data
+      severity: critical
+      description: Do not expose secrets, credentials, or sensitive data.
+  performance:
+    - id: avoid-unnecessary-work
+      severity: medium
+      description: Identify avoidable work that could affect runtime or resource usage.
+  testing:
+    - id: cover-behavior
+      severity: high
+      description: Check that important behavior and regression cases are tested.
