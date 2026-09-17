@@ -10,9 +10,9 @@ def main() -> None:
     """Start the Flask development server."""
 
     app.run(
-        host="127.0.0.1",
-        port=app.config["PORT"],
-        debug=app.config["DEBUG"],
+        host=app.config["FLASK_HOST"],
+        port=app.config["FLASK_PORT"],
+        debug=app.config["FLASK_DEBUG"],
     )
 
 

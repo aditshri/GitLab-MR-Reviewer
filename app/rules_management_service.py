@@ -50,7 +50,7 @@ class RulesManagementService:
         """Configure custom rules storage and the bundled default rules path."""
 
         project_root = Path(__file__).resolve().parent.parent
-        configured_directory = rules_directory or Config.RULES_DIRECTORY
+        configured_directory = rules_directory or "rules"
         directory = Path(configured_directory)
         self._rules_directory = (
             directory if directory.is_absolute() else project_root / directory

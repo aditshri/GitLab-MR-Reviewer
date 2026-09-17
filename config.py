@@ -3,24 +3,7 @@
 import os
 from pathlib import Path
 
-
-def _load_local_env() -> None:
-    """Load simple KEY=VALUE entries from the project-local .env file."""
-
-    env_file = Path(__file__).resolve().parent / ".env"
-    if not env_file.exists():
-        return
-
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        name, value = line.split("=", 1)
-        name = name.strip()
-        value = value.strip().strip("\"'")
-        if name:
-            os.environ.setdefault(name, value)
+from dotenv import load_dotenv
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -31,17 +14,25 @@ def _as_bool(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-_load_local_env()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 class Config:
     """Application settings sourced from environment variables."""
 
-    GITLAB_URL = os.getenv("GITLAB_URL")
+    GITLAB_URL = os.getenv("GITLAB_URL", "https://gitlab.com")
     GITLAB_TOKEN = os.getenv("GITLAB_TOKEN")
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-    RULES_DIRECTORY = os.getenv("RULES_DIRECTORY", "rules")
+    GITHUB_MODELS_TOKEN = os.getenv("GITHUB_MODELS_TOKEN")
+    GITHUB_MODELS_ENDPOINT = os.getenv(
+        "GITHUB_MODELS_ENDPOINT",
+        "https://models.github.ai/inference",
+    )
+    GITHUB_MODELS_MODEL = os.getenv("GITHUB_MODELS_MODEL", "openai/gpt-4o-mini")
+    REVIEW_RULES_FILE = os.getenv("REVIEW_RULES_FILE", "review_rules.yaml")
 
-    FLASK_ENV = os.getenv("FLASK_ENV", "development")
+    FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
     DEBUG = _as_bool(os.getenv("FLASK_DEBUG"), default=False)
-    PORT = int(os.getenv("PORT", "5000"))
+    FLASK_DEBUG = DEBUG
+    FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
+    FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
+    SECRET_KEY = FLASK_SECRET_KEY
