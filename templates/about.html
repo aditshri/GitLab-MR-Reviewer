@@ -1,11 +1,33 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>About | GitLab MR AI Reviewer</title></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>About | MR Signal</title>
+  <style>
+    :root { --ink:#172121; --muted:#64706e; --paper:#f4f1e9; --teal:#087e78; --line:#d9ddd4; }
+    * { box-sizing:border-box; } body { margin:0; min-height:100vh; color:var(--ink); background:linear-gradient(135deg,#f4f1e9,#e9f3eb); font:17px/1.6 Georgia,"Times New Roman",serif; }
+    main { width:min(760px,calc(100% - 40px)); margin:0 auto; padding:70px 0; } a { color:var(--teal); font:700 14px "Trebuchet MS",sans-serif; text-decoration:none; } h1 { margin:28px 0 12px; font-size:clamp(44px,8vw,78px); line-height:.95; } p { color:var(--muted); font-size:20px; } .rule-list { display:flex; flex-wrap:wrap; gap:10px; margin-top:26px; padding:0; list-style:none; } .rule-list li { border:1px solid var(--line); border-radius:5px; background:#fffdf7; padding:10px 13px; font:700 13px "Trebuchet MS",sans-serif; text-transform:capitalize; } #rules-status { color:var(--muted); font:14px "Trebuchet MS",sans-serif; }
+  </style>
+</head>
 <body>
   <main>
-    <h1>About</h1>
-    <p>This application reviews GitLab merge requests with configurable rules and AI.</p>
     <a href="/">Back to reviewer</a>
+    <h1>Review with context.</h1>
+    <p>MR Signal brings GitLab changes, team rules, and focused AI analysis into one deliberate review loop. It keeps findings actionable and lets you post the finished review back to the merge request.</p>
+    <h2>Enabled review categories</h2>
+    <p id="rules-status">Loading current rules...</p>
+    <ul class="rule-list" id="rule-list"></ul>
   </main>
+  <script>
+    const titleCase = (value) => String(value).replace(/_/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+    fetch('/api/rules/current').then((response) => response.json().then((body) => ({ok: response.ok, body}))).then(({ok, body}) => {
+      if (!ok) throw new Error(body.error || 'Unable to load rules.');
+      const rules = body.rules || {};
+      const categories = Array.isArray(rules.general?.enabled_categories) ? rules.general.enabled_categories : (rules.rules ? Object.keys(rules.rules) : Object.keys(rules).filter((key) => !['general','output','ai_behavior'].includes(key)));
+      document.querySelector('#rule-list').innerHTML = categories.map((category) => `<li>${titleCase(category)}</li>`).join('');
+      document.querySelector('#rules-status').textContent = categories.length ? 'The current ruleset guides every review.' : 'No categories are currently enabled.';
+    }).catch((error) => { document.querySelector('#rules-status').textContent = error.message; });
+  </script>
 </body>
 </html>
