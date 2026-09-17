@@ -77,6 +77,33 @@ def test_review_can_be_retrieved_by_id(service: AuditService) -> None:
     assert service.get_review("missing-review") is None
 
 
+def test_structured_review_round_trip_returns_matching_data(tmp_path: Path) -> None:
+    """A structured review ID can be used to retrieve its persisted record."""
+
+    service = AuditService(tmp_path / "audit_logs")
+    review = {
+        "summary": "One issue found",
+        "issues": [{"severity": "high", "category": "security", "description": "Validate input"}],
+        "positives": ["Clear naming"],
+        "diff": "diff content",
+    }
+
+    review_id = service.log_review(
+        MR_URL,
+        "Improve parser",
+        "author",
+        "quick",
+        review,
+    )
+
+    assert isinstance(review_id, str)
+    stored = service.get_review(review_id)
+    assert stored is not None
+    assert stored["review_id"] == review_id
+    assert stored["mr_url"] == MR_URL
+    assert stored["review_dict"] == review
+
+
 def test_mr_history_returns_only_matching_reviews_newest_first(
     service: AuditService,
 ) -> None:

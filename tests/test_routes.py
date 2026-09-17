@@ -109,6 +109,26 @@ def test_missing_mr_url_returns_bad_request(client: tuple[Flask, tuple[Mock, Moc
     gitlab.parse_merge_request_url.assert_not_called()
 
 
+def test_health_endpoint_returns_expected_keys() -> None:
+    """The health endpoint reports stable system status fields."""
+
+    app = Flask(__name__)
+    app.testing = True
+    gitlab = Mock()
+    gitlab.validate_connection.return_value = True
+    register_routes(app, gitlab=gitlab, ai=None)
+
+    response = app.test_client().get("/api/health")
+
+    assert response.status_code == 200
+    assert set(response.get_json()) == {
+        "status",
+        "gitlab_connected",
+        "ai_configured",
+    }
+    assert response.get_json()["status"] == "ok"
+
+
 def test_invalid_review_type_returns_bad_request(
     client: tuple[Flask, tuple[Mock, Mock, Mock]],
 ) -> None:

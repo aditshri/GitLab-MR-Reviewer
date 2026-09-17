@@ -102,6 +102,33 @@ def test_invalid_url_is_rejected(
         gitlab_service.parse_merge_request_url("not-a-url")
 
 
+@pytest.mark.parametrize(
+    "mr_url",
+    [
+        "https://gitlab.example.invalid/team/project/-/merge_requests/not-a-number",
+        "https://other.example.invalid/team/project/-/merge_requests/17",
+        "https://gitlab.example.invalid/team/project/merge_requests/17",
+        "not-a-url",
+    ],
+)
+def test_parse_mr_url_rejects_malformed_urls(
+    gitlab_service: GitLabService,
+    mr_url: str,
+) -> None:
+    """The public parse_mr_url API rejects malformed and untrusted URLs."""
+
+    with pytest.raises(InvalidMergeRequestURLError):
+        gitlab_service.parse_mr_url(mr_url)
+
+
+def test_parse_mr_url_accepts_valid_url(gitlab_service: GitLabService) -> None:
+    """The public parse_mr_url API returns project path and IID."""
+
+    assert gitlab_service.parse_mr_url(
+        "https://gitlab.example.invalid/team/project/-/merge_requests/17"
+    ) == ("team/project", 17)
+
+
 def _change(**overrides: object) -> dict[str, object]:
     """Build a minimal GitLab changed-file response entry."""
 
