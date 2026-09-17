@@ -14,6 +14,69 @@ from app.review_rules_service import (
 )
 
 
+DEFAULT_RULES_DOCUMENT = {
+    "general": {
+        "team_name": "Default",
+        "enabled_categories": [
+            "code_quality",
+            "security",
+            "performance",
+            "testing",
+        ],
+    },
+    "security": [],
+    "testing": [],
+    "output": {
+        "include_positive_feedback": True,
+        "severity_levels": ["critical", "high", "medium", "low"],
+    },
+    "ai_behavior": {
+        "tone": "constructive",
+        "detail_level": "comprehensive",
+        "suggest_improvements": True,
+    },
+}
+
+
+def convert_markdown_to_yaml(markdown_text: str) -> dict:
+    """Convert category headings and bullet rules into the current rule schema."""
+
+    document = deepcopy(DEFAULT_RULES_DOCUMENT)
+    if not isinstance(markdown_text, str) or not markdown_text.strip():
+        return document
+
+    categories: dict[str, list[str]] = {}
+    current_category: str | None = None
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("```"):
+            continue
+
+        heading = re.match(r"^#{1,6}\s+(.+?)\s*#*$", line)
+        if heading:
+            current_category = _normalize_category_name(heading.group(1))
+            categories.setdefault(current_category, [])
+            continue
+
+        if current_category is None:
+            continue
+        rule = re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)(.+)$", line)
+        if rule:
+            categories[current_category].append(rule.group(1).strip())
+
+    document["general"]["enabled_categories"] = list(categories)
+    document.update(categories)
+    return document
+
+
+def _normalize_category_name(value: str) -> str:
+    """Convert a Markdown heading into a stable YAML category key."""
+
+    normalized = re.sub(r"\s+rules?$", "", value.strip().lower())
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    return normalized or "uncategorized"
+
+
 _CATEGORY_ALIASES = {
     "code quality": "code_quality",
     "code_quality": "code_quality",

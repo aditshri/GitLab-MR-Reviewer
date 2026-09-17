@@ -219,6 +219,61 @@ class GitLabService:
         attributes = getattr(note, "attributes", {})
         return dict(attributes) if isinstance(attributes, dict) else {}
 
+    def get_review_comments(
+        self,
+        project_path: str,
+        username: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return merge-request note bodies from a project, optionally by reviewer."""
+
+        if limit < 0:
+            raise ValueError("limit must not be negative.")
+        project = self._get_project(project_path)
+        try:
+            merge_requests = project.mergerequests.list(state="all", all=True)
+        except GitlabError as exc:
+            raise self._api_error(exc, f"review history for project '{project_path}'") from exc
+
+        comments: list[dict[str, Any]] = []
+        for merge_request in merge_requests:
+            merge_request_iid = getattr(merge_request, "iid", None)
+            try:
+                full_merge_request = project.mergerequests.get(merge_request_iid)
+                notes = full_merge_request.notes.list(all=True)
+            except GitlabError as exc:
+                raise self._api_error(
+                    exc,
+                    f"review history for merge request !{merge_request_iid}",
+                ) from exc
+
+            for note in notes:
+                attributes = getattr(note, "attributes", {})
+                if not isinstance(attributes, dict):
+                    attributes = {}
+                author = attributes.get("author") or getattr(note, "author", {}) or {}
+                reviewer = (
+                    author.get("username") or author.get("name")
+                    if isinstance(author, dict)
+                    else str(author)
+                )
+                if username and reviewer != username:
+                    continue
+                body = attributes.get("body") or getattr(note, "body", "")
+                if not isinstance(body, str) or not body.strip():
+                    continue
+                comments.append(
+                    {
+                        "body": body.strip(),
+                        "author": reviewer,
+                        "merge_request_id": str(merge_request_iid),
+                        "project": project_path,
+                    }
+                )
+                if len(comments) >= limit:
+                    return comments
+        return comments
+
     def get_merge_request_changes(
         self, merge_request_url: str
     ) -> MergeRequestChanges:
